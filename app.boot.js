@@ -164,7 +164,29 @@ function loadFromStorage(key, fallback) {
 }
 
 function saveToStorage(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  const compactValue = compactLocalStorageValue(key, value);
+
+  try {
+    localStorage.setItem(key, JSON.stringify(compactValue));
+  } catch (error) {
+    console.warn(`${key} 로컬 임시 저장 공간이 부족해 캐시를 초기화합니다.`, error);
+    try {
+      localStorage.removeItem(key);
+      localStorage.setItem(key, JSON.stringify(compactValue));
+    } catch (retryError) {
+      console.warn(`${key} 로컬 임시 저장을 건너뜁니다. Supabase 원본 데이터는 유지됩니다.`, retryError);
+    }
+  }
+}
+
+function compactLocalStorageValue(key, value) {
+  if (!Array.isArray(value)) return value;
+  if (![STORAGE_KEYS.stories, STORAGE_KEYS.cards].includes(key)) return value;
+
+  return value.map((item) => ({
+    ...item,
+    imageData: item.imageData?.startsWith("data:") ? "" : item.imageData,
+  }));
 }
 
 function normalizeStories(items) {

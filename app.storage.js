@@ -273,7 +273,7 @@ function getStoryImageObjectPath(story) {
   }
 
   if (!story.id || !story.imageName) return "";
-  return `stories/${story.id}-${sanitizeFileName(story.imageName)}`;
+  return `stories/${story.id}-${getStorageImageFileName(story.imageName)}`;
 }
 
 async function replaceStoryImage(story, file) {

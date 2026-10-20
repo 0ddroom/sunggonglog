@@ -435,6 +435,14 @@ function sanitizeFileName(value) {
     .slice(0, 60);
 }
 
+function getStorageImageFileName(value) {
+  const extension = String(value || "")
+    .match(/\.([a-zA-Z0-9]{1,8})$/)?.[1]
+    ?.toLowerCase();
+  const safeExtension = extension && /^[a-z0-9]+$/.test(extension) ? extension : "jpg";
+  return `image.${safeExtension}`;
+}
+
 function formatDate(value) {
   return new Intl.DateTimeFormat("ko-KR", {
     year: "numeric",

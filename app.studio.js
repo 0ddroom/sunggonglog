@@ -65,7 +65,7 @@ function bindStudio() {
         imageData = await uploadDataUrl(
           elements.cardCanvas.toDataURL("image/jpeg", 0.9),
           appConfig.cardBucket,
-          `cards/${cardId}-${sanitizeFileName(story.division)}-${sanitizeFileName(story.title)}.jpg`,
+          `cards/${cardId}.jpg`,
         );
       }
     } catch (error) {

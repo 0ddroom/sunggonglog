@@ -91,7 +91,7 @@ function bindForm() {
         uploadDataUrl(
           compressedImage,
           appConfig.storyBucket,
-          `stories/${storyId}-${sanitizeFileName(file.name || "story-image.jpg")}`,
+          `stories/${storyId}-${getStorageImageFileName(file.name)}`,
         ),
       );
 

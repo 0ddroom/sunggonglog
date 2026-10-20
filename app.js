@@ -164,7 +164,29 @@ function loadFromStorage(key, fallback) {
 }
 
 function saveToStorage(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
+  const compactValue = compactLocalStorageValue(key, value);
+
+  try {
+    localStorage.setItem(key, JSON.stringify(compactValue));
+  } catch (error) {
+    console.warn(`${key} 로컬 임시 저장 공간이 부족해 캐시를 초기화합니다.`, error);
+    try {
+      localStorage.removeItem(key);
+      localStorage.setItem(key, JSON.stringify(compactValue));
+    } catch (retryError) {
+      console.warn(`${key} 로컬 임시 저장을 건너뜁니다. Supabase 원본 데이터는 유지됩니다.`, retryError);
+    }
+  }
+}
+
+function compactLocalStorageValue(key, value) {
+  if (!Array.isArray(value)) return value;
+  if (![STORAGE_KEYS.stories, STORAGE_KEYS.cards].includes(key)) return value;
+
+  return value.map((item) => ({
+    ...item,
+    imageData: item.imageData?.startsWith("data:") ? "" : item.imageData,
+  }));
 }
 
 function normalizeStories(items) {
@@ -350,7 +372,7 @@ function bindForm() {
         uploadDataUrl(
           compressedImage,
           appConfig.storyBucket,
-          `stories/${storyId}-${sanitizeFileName(file.name || "story-image.jpg")}`,
+          `stories/${storyId}-${getStorageImageFileName(file.name)}`,
         ),
       );
 
@@ -607,7 +629,7 @@ function bindStudio() {
         imageData = await uploadDataUrl(
           elements.cardCanvas.toDataURL("image/jpeg", 0.9),
           appConfig.cardBucket,
-          `cards/${cardId}-${sanitizeFileName(story.division)}-${sanitizeFileName(story.title)}.jpg`,
+          `cards/${cardId}.jpg`,
         );
       }
     } catch (error) {
@@ -1317,7 +1339,7 @@ function getStoryImageObjectPath(story) {
   }
 
   if (!story.id || !story.imageName) return "";
-  return `stories/${story.id}-${sanitizeFileName(story.imageName)}`;
+  return `stories/${story.id}-${getStorageImageFileName(story.imageName)}`;
 }
 
 async function replaceStoryImage(story, file) {
@@ -2271,6 +2293,14 @@ function sanitizeFileName(value) {
     .replace(/[\\/:*?"<>|]/g, "_")
     .replace(/\s+/g, "_")
     .slice(0, 60);
+}
+
+function getStorageImageFileName(value) {
+  const extension = String(value || "")
+    .match(/\.([a-zA-Z0-9]{1,8})$/)?.[1]
+    ?.toLowerCase();
+  const safeExtension = extension && /^[a-z0-9]+$/.test(extension) ? extension : "jpg";
+  return `image.${safeExtension}`;
 }
 
 function formatDate(value) {
