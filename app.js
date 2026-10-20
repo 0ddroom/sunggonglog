@@ -262,6 +262,7 @@ async function hydrateSharedStorage() {
 
   try {
     const [remoteStories, remoteCards] = await Promise.all([fetchRemoteStories(), fetchRemoteCards()]);
+    sharedStorageAvailable = true;
     stories = normalizeStories(remoteStories);
     cards = normalizeCards(remoteCards);
     saveToStorage(STORAGE_KEYS.stories, stories);
@@ -328,67 +329,75 @@ function bindForm() {
       return;
     }
 
-    const formData = new FormData(elements.form);
-    const file = $("#referenceImage").files[0];
-    const storyId = createId();
-    const compressedImage = await compressImage(file);
-    let imageData = compressedImage;
+    const submitButton = elements.form.querySelector('button[type="submit"]');
+    const originalSubmitText = submitButton.textContent;
+    submitButton.disabled = true;
+    submitButton.textContent = "공유 중...";
 
+    let submissionStage = "공용 저장소 연결";
     try {
-      if (sharedStorageAvailable) {
-        imageData = await uploadDataUrl(
+      await ensureSharedStorageAvailable();
+
+      const formData = new FormData(elements.form);
+      const file = $("#referenceImage").files[0];
+      const storyId = createId();
+
+      submissionStage = "이미지 처리";
+      const compressedImage = await compressImage(file);
+
+      submissionStage = "이미지 업로드";
+      const imageData = await retryOperation(() =>
+        uploadDataUrl(
           compressedImage,
           appConfig.storyBucket,
           `stories/${storyId}-${sanitizeFileName(file.name || "story-image.jpg")}`,
-        );
-      }
-    } catch (error) {
-      console.warn("참고 이미지 공용 저장소 업로드 실패, 압축 이미지 직접 저장으로 대체합니다.", error);
-      imageData = compressedImage;
-    }
+        ),
+      );
 
-    const passwordHash = await hashText(formData.get("deletePassword").trim());
-    const story = {
-      id: storyId,
-      createdAt: new Date().toISOString(),
-      reportMonth: formData.get("reportMonth").trim(),
-      division: formData.get("division").trim(),
-      owner: formData.get("owner").trim(),
-      email: formData.get("email").trim(),
-      title: formData.get("title").trim(),
-      period: formData.get("period").trim(),
-      participants: formData.get("participants").trim(),
-      summary: formData.get("summary").trim(),
-      impactMetric: formData.get("impactMetric").trim() || "정량적 성과는 운영 후 집계 예정",
-      evidence: formData.get("evidence").trim(),
-      cultureValue: formData.get("evidence").trim(),
-      quote: formData.get("quote").trim() || "관련된 한마디는 추후 공유 예정입니다.",
-      desiredMessage: formData.get("desiredMessage").trim(),
-      passwordHash,
-      imageName: file.name,
-      imageData,
-    };
+      const passwordHash = await hashText(formData.get("deletePassword").trim());
+      const story = {
+        id: storyId,
+        createdAt: new Date().toISOString(),
+        reportMonth: formData.get("reportMonth").trim(),
+        division: formData.get("division").trim(),
+        owner: formData.get("owner").trim(),
+        email: formData.get("email").trim(),
+        title: formData.get("title").trim(),
+        period: formData.get("period").trim(),
+        participants: formData.get("participants").trim(),
+        summary: formData.get("summary").trim(),
+        impactMetric: formData.get("impactMetric").trim() || "정량적 성과는 운영 후 집계 예정",
+        evidence: formData.get("evidence").trim(),
+        cultureValue: formData.get("evidence").trim(),
+        quote: formData.get("quote").trim() || "관련된 한마디는 추후 공유 예정입니다.",
+        desiredMessage: formData.get("desiredMessage").trim(),
+        passwordHash,
+        imageName: file.name,
+        imageData,
+      };
 
-    try {
-      await persistStory(story);
+      submissionStage = "사례 저장";
+      await persistStoryWithRecovery(story);
       stories.unshift(story);
       saveToStorage(STORAGE_KEYS.stories, stories);
+
+      notifyStoryShared(story).catch((error) => {
+        console.warn("사례 공유 알림 메일 발송 실패", error);
+      });
+
+      elements.form.reset();
+      setDefaultMonth();
+      clearValidationAlert();
+      renderAll();
+      alert("사례가 공유되었습니다. 공유된 사례 보기에서 확인할 수 있습니다.");
+      showView("archive");
     } catch (error) {
-      console.error("사례 저장 실패", error);
-      alert("사례를 저장하지 못했습니다. 공용 저장소 설정을 확인해 주세요.");
-      return;
+      console.error(`${submissionStage} 실패`, error);
+      alert(getSubmissionErrorMessage(error, submissionStage));
+    } finally {
+      submitButton.disabled = false;
+      submitButton.textContent = originalSubmitText;
     }
-
-    notifyStoryShared(story).catch((error) => {
-      console.warn("사례 공유 알림 메일 발송 실패", error);
-    });
-
-    elements.form.reset();
-    setDefaultMonth();
-    clearValidationAlert();
-    renderAll();
-    alert("사례가 공유되었습니다. 공유된 사례 보기에서 확인할 수 있습니다.");
-    showView("archive");
   });
 
   elements.resetForm.addEventListener("click", () => {
@@ -1064,13 +1073,77 @@ async function fetchRemoteCards() {
 }
 
 async function persistStory(story) {
-  if (!sharedStorageAvailable) return;
+  if (!sharedStorageAvailable) {
+    throw new Error("Supabase 공용 저장소에 연결되지 않았습니다.");
+  }
 
   await supabaseFetch("/rest/v1/stories", {
     method: "POST",
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify(mapStoryToRemote(story)),
   });
+}
+
+async function ensureSharedStorageAvailable() {
+  if (!sharedStorageEnabled) {
+    throw new Error("Supabase 공용 저장소 설정이 비어 있습니다.");
+  }
+
+  await retryOperation(() => supabaseFetch("/rest/v1/stories?select=id&limit=1"));
+  sharedStorageAvailable = true;
+}
+
+async function persistStoryWithRecovery(story) {
+  try {
+    await persistStory(story);
+  } catch (firstError) {
+    await delay(700);
+    const existing = await supabaseFetch(`/rest/v1/stories?id=eq.${encodeURIComponent(story.id)}&select=id`);
+    if (Array.isArray(existing) && existing.length > 0) return;
+
+    try {
+      await persistStory(story);
+    } catch (retryError) {
+      retryError.cause = firstError;
+      throw retryError;
+    }
+  }
+}
+
+async function retryOperation(operation, attempts = 2) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await delay(600 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function getSubmissionErrorMessage(error, stage) {
+  const details = String(error?.message || error || "");
+
+  if (/Failed to fetch|NetworkError|Load failed|연결되지 않았습니다/i.test(details)) {
+    return `${stage}에 실패했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.`;
+  }
+  if (/paused|status[^0-9]*540|요청 실패:\s*540/i.test(details)) {
+    return "Supabase 프로젝트가 일시 정지된 상태입니다. 프로젝트를 재개한 뒤 다시 시도해 주세요.";
+  }
+  if (/413|too large|payload/i.test(details)) {
+    return "이미지 용량이 너무 큽니다. 다른 이미지를 선택하거나 용량을 줄인 뒤 다시 시도해 주세요.";
+  }
+  if (/401|403|Unauthorized|row-level security|AccessDenied/i.test(details)) {
+    return `${stage} 권한을 확인하지 못했습니다. 관리자에게 Supabase 저장 정책 확인을 요청해 주세요.`;
+  }
+
+  return `${stage}에 실패했습니다. 입력 내용은 화면에 남아 있으니 잠시 후 다시 시도해 주세요.`;
 }
 
 async function notifyStoryShared(story) {

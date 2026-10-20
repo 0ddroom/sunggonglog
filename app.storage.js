@@ -29,13 +29,77 @@ async function fetchRemoteCards() {
 }
 
 async function persistStory(story) {
-  if (!sharedStorageAvailable) return;
+  if (!sharedStorageAvailable) {
+    throw new Error("Supabase 공용 저장소에 연결되지 않았습니다.");
+  }
 
   await supabaseFetch("/rest/v1/stories", {
     method: "POST",
     headers: { Prefer: "return=minimal" },
     body: JSON.stringify(mapStoryToRemote(story)),
   });
+}
+
+async function ensureSharedStorageAvailable() {
+  if (!sharedStorageEnabled) {
+    throw new Error("Supabase 공용 저장소 설정이 비어 있습니다.");
+  }
+
+  await retryOperation(() => supabaseFetch("/rest/v1/stories?select=id&limit=1"));
+  sharedStorageAvailable = true;
+}
+
+async function persistStoryWithRecovery(story) {
+  try {
+    await persistStory(story);
+  } catch (firstError) {
+    await delay(700);
+    const existing = await supabaseFetch(`/rest/v1/stories?id=eq.${encodeURIComponent(story.id)}&select=id`);
+    if (Array.isArray(existing) && existing.length > 0) return;
+
+    try {
+      await persistStory(story);
+    } catch (retryError) {
+      retryError.cause = firstError;
+      throw retryError;
+    }
+  }
+}
+
+async function retryOperation(operation, attempts = 2) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await delay(600 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function getSubmissionErrorMessage(error, stage) {
+  const details = String(error?.message || error || "");
+
+  if (/Failed to fetch|NetworkError|Load failed|연결되지 않았습니다/i.test(details)) {
+    return `${stage}에 실패했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.`;
+  }
+  if (/paused|status[^0-9]*540|요청 실패:\s*540/i.test(details)) {
+    return "Supabase 프로젝트가 일시 정지된 상태입니다. 프로젝트를 재개한 뒤 다시 시도해 주세요.";
+  }
+  if (/413|too large|payload/i.test(details)) {
+    return "이미지 용량이 너무 큽니다. 다른 이미지를 선택하거나 용량을 줄인 뒤 다시 시도해 주세요.";
+  }
+  if (/401|403|Unauthorized|row-level security|AccessDenied/i.test(details)) {
+    return `${stage} 권한을 확인하지 못했습니다. 관리자에게 Supabase 저장 정책 확인을 요청해 주세요.`;
+  }
+
+  return `${stage}에 실패했습니다. 입력 내용은 화면에 남아 있으니 잠시 후 다시 시도해 주세요.`;
 }
 
 async function notifyStoryShared(story) {
